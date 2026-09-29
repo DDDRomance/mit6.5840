@@ -1,27 +1,149 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
 type Coordinator struct {
 	// Your definitions here.
+	MaxMapTaskID int
+	nReduce      int
 
+	files             []string
+	MapTaskStatus     []bool
+	MapTaskDoneStatus []bool
+
+	ReduceTaskStatus     []bool
+	ReduceTaskDoneStatus []bool
+
+	mu sync.Mutex
+
+	Status string
+
+	DoneMapTaskTotal    int
+	DoneReduceTaskTotal int
+
+	DoneStatus bool
+	// 判断现在是"Map"阶段还是“Reduce”阶段
+
+	MapTaskStartTime    []time.Time
+	ReduceTaskStartTime []time.Time
+}
+
+func (c *Coordinator) TaskDone(args *TaskDoneArgs, reply *TaskDoneReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if args.TaskType == "Map" {
+		if c.MapTaskDoneStatus[args.TaskID] == false {
+			c.MapTaskDoneStatus[args.TaskID] = true
+			c.DoneMapTaskTotal++
+		}
+
+		if c.DoneMapTaskTotal == c.MaxMapTaskID {
+			c.Status = "Reduce"
+		}
+	} else {
+		if args.TaskType == "Reduce" && c.ReduceTaskDoneStatus[args.TaskID] == false {
+			c.ReduceTaskDoneStatus[args.TaskID] = true
+			c.DoneReduceTaskTotal++
+		}
+
+		if c.DoneReduceTaskTotal == c.nReduce {
+			c.DoneStatus = true
+		}
+	}
+	return nil
+}
+
+func (c *Coordinator) CheckTimeOut() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.Status == "Map" {
+		for i := 0; i < c.MaxMapTaskID; i++ {
+			if c.MapTaskStatus[i] == true && c.MapTaskDoneStatus[i] == false {
+				if time.Since(c.MapTaskStartTime[i]) >= 10*time.Second {
+					c.MapTaskStatus[i] = false
+				}
+			}
+		}
+	} else if c.Status == "Reduce" {
+		for i := 0; i < c.nReduce; i++ {
+			if c.ReduceTaskStatus[i] == true && c.ReduceTaskDoneStatus[i] == false {
+				if time.Since(c.ReduceTaskStartTime[i]) >= 10*time.Second {
+					c.ReduceTaskStatus[i] = false
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (c *Coordinator) GetTask(args *TaskRequest, reply *TaskReply) error {
+	c.CheckTimeOut()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.Status == "Map" {
+		findTask := false
+		for i := 0; i < c.MaxMapTaskID; i++ {
+			if c.MapTaskStatus[i] == false {
+				reply.TaskType = "Map"
+				reply.MapTaskFileName = c.files[i]
+				reply.MapID = i
+				reply.MaxMapTaskID = c.MaxMapTaskID
+				reply.NReduce = c.nReduce
+
+				c.MapTaskStatus[i] = true
+				c.MapTaskStartTime[i] = time.Now()
+				findTask = true
+				break
+			}
+		}
+
+		if findTask == false {
+			reply.TaskType = "Wait"
+		}
+	} else {
+		if c.Status == "Reduce" {
+			findTask := false
+			for i := 0; i < c.nReduce; i++ {
+				if c.ReduceTaskStatus[i] == false {
+					reply.TaskType = "Reduce"
+					reply.ReduceID = i
+					reply.MaxMapTaskID = c.MaxMapTaskID
+
+					c.ReduceTaskStatus[i] = true
+					c.ReduceTaskStartTime[i] = time.Now()
+					findTask = true
+					break
+				}
+			}
+
+			if findTask == false {
+				if c.DoneStatus == true {
+					reply.TaskType = "Exit"
+				} else {
+					reply.TaskType = "Wait"
+				}
+			}
+		} else {
+			log.Fatalf("Illegal Task Request Type\n")
+		}
+	}
 	return nil
 }
-
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server(sockname string) {
@@ -38,12 +160,10 @@ func (c *Coordinator) server(sockname string) {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	// Your code here.
-
-
-	return ret
+	return c.DoneStatus
 }
 
 // create a Coordinator.
@@ -52,8 +172,24 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
+	// MaxTaskID = len(string)
 	// Your code here.
+	c.MaxMapTaskID = len(files)
+	c.nReduce = nReduce
+	c.Status = "Map"
 
+	c.MapTaskStatus = make([]bool, len(files))
+	c.MapTaskDoneStatus = make([]bool, len(files))
+
+	c.ReduceTaskStatus = make([]bool, nReduce)
+	c.ReduceTaskDoneStatus = make([]bool, nReduce)
+
+	c.files = files
+	c.DoneMapTaskTotal = 0
+	c.DoneReduceTaskTotal = 0
+
+	c.MapTaskStartTime = make([]time.Time, len(files))
+	c.ReduceTaskStartTime = make([]time.Time, nReduce)
 
 	c.server(sockname)
 	return &c
