@@ -107,6 +107,12 @@ func (rf *Raft) persist() {
 	rf.persister.Save(raftstate, rf.snapshot)
 }
 
+func (rf *Raft) Lastapplied() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.lastApplied
+}
+
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -466,7 +472,7 @@ func (rf *Raft) triggerReplication(peer int) {
 		rf.mu.Unlock()
 		return
 	}
-	if time.Since(rf.lastReplication[peer]) < 100*time.Millisecond {
+	if time.Since(rf.lastReplication[peer]) < 10*time.Millisecond {
 		rf.mu.Unlock()
 		return
 	}
@@ -791,8 +797,6 @@ func (rf *Raft) ticker() {
 		}
 		rf.mu.Unlock()
 
-		time.Sleep(50 * time.Millisecond)
-
 		var SendHeartbeat bool
 		var term int
 		rf.mu.Lock()
@@ -813,6 +817,8 @@ func (rf *Raft) ticker() {
 		if isLeader {
 			rf.commitLog()
 		}
+
+		time.Sleep(20 * time.Millisecond)
 
 	}
 }

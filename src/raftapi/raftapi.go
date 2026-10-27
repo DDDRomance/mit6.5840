@@ -13,6 +13,8 @@ type Raft interface {
 	// For Snaphots (3D)
 	Snapshot(index int, snapshot []byte)
 	PersistBytes() int
+
+	Lastapplied() int
 }
 
 // As each Raft peer becomes aware that successive log entries are
